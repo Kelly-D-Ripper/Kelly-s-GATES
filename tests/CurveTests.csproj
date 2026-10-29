@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+    <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../src/ThrottleCurve.cs" Link="ThrottleCurve.cs" />
+    <Compile Include="../src/AxisDetector.cs" Link="AxisDetector.cs" />
+    <Compile Include="../src/CalibrationWizard.cs" Link="CalibrationWizard.cs" />
+    <Compile Include="../src/EngineRouting.cs" Link="EngineRouting.cs" />
+    <Compile Include="../src/OwnedDiscovery.cs" Link="OwnedDiscovery.cs" />
+    <Compile Include="../src/ControlPolicies.cs" Link="ControlPolicies.cs" />
+    <Compile Include="../src/ButtonDetector.cs" Link="ButtonDetector.cs" />
+    <Compile Include="../src/ControlEligibility.cs" Link="ControlEligibility.cs" />
+  </ItemGroup>
+</Project>
