@@ -1,0 +1,17 @@
+{
+  "plugin": "com.aaron.ursaminorthrottle",
+  "name": "Kelly's GATES",
+  "author": "Brig. Gen. Kelly D. Ripper",
+  "description": "Your detents are there for a reason. Kelly's GATES lines up your MIL stop with the afterburner, lets you calibrate single or split throttles, and gives the airbrake its own button. An analogue range below idle can command native reverse on aircraft that support it.\n\nExperimental: broader controller support and multiplayer have not yet been tested in game. Please keep the exciting discoveries on the runway.",
+  "links": [
+    { "label": "GitHub", "url": "https://github.com/Kelly-D-Ripper/Kelly-s-GATES" },
+    { "label": "Discord", "url": "https://discord.gg/shipyard" }
+  ],
+  "requisites": [
+    {
+      "plugin": "experimental.assassin1076.extrainputframework",
+      "name": "Extra Input Framework",
+      "repository": "Assassin1076/NuclearOptionInputFramework"
+    }
+  ]
+}

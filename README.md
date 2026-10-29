@@ -6,6 +6,8 @@ Detent-aware throttle calibration for Nuclear Option. Client-only BepInEx 5 mod.
 
 GATES detects an analogue throttle axis without relying on a manufacturer name, maps the physical MIL stop to the aircraft's afterburner threshold where it can find one, and supports separate left/right levers or one shared lever. It preserves the earlier URSA calibration, airbrake binding and config file. The original plugin ID, DLL and legacy control action names intentionally remain unchanged for compatibility: install only one copy.
 
+The DLL contains optional DOORMAN 1.4 preview metadata, including the author, links and Extra Input Framework requirement. No preview image is included yet. DOORMAN is not required to use the mod.
+
 ## Requirements and installation
 
 - Nuclear Option on Windows, BepInEx 5, and [Extra Input Framework](https://github.com/Assassin1076/NuclearOptionInputFramework/releases) for your game version. Install the framework separately, following its instructions; it is a shared dependency and is not included here.

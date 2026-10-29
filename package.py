@@ -5,7 +5,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 root = Path(__file__).resolve().parent
 out = root / "release"
 out.mkdir(exist_ok=True)
-archive = out / "Kellys-GATES-0.6.0-draft-r2.zip"
+archive = out / "Kellys-GATES-0.6.0-doorman-draft.zip"
 sources = {
     "UrsaMinorThrottle.dll": root / "bin/Release/net472/UrsaMinorThrottle.dll",
     "README.md": root / "README.md",
