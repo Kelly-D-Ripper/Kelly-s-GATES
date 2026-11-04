@@ -8,6 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../src/ThrottleCurve.cs" Link="ThrottleCurve.cs" />
+    <Compile Include="../src/FocusPickup.cs" Link="FocusPickup.cs" />
+    <Compile Include="../src/GaugeCurve.cs" Link="GaugeCurve.cs" />
     <Compile Include="../src/AxisDetector.cs" Link="AxisDetector.cs" />
     <Compile Include="../src/CalibrationWizard.cs" Link="CalibrationWizard.cs" />
     <Compile Include="../src/EngineRouting.cs" Link="EngineRouting.cs" />
@@ -15,5 +17,6 @@
     <Compile Include="../src/ControlPolicies.cs" Link="ControlPolicies.cs" />
     <Compile Include="../src/ButtonDetector.cs" Link="ButtonDetector.cs" />
     <Compile Include="../src/ControlEligibility.cs" Link="ControlEligibility.cs" />
+    <Compile Include="../src/CollectiveCalibration.cs" Link="CollectiveCalibration.cs" />
   </ItemGroup>
 </Project>

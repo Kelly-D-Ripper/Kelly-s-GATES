@@ -18,7 +18,7 @@ namespace UrsaMinorThrottle
         private readonly Action<float> setReversePower;
         private readonly Action bindAirbrake, clearAirbrake;
         private readonly Action<bool, bool> setCalibrationMode;
-        private GameObject root, ownedEventSystem, calibrationPage, optionsPage;
+        private GameObject root, ownedEventSystem, calibrationPage, optionsPage, helicopterPage;
         private RectTransform panel;
         private Canvas canvas;
         private TMP_Text titleSource, bodySource;
@@ -30,23 +30,27 @@ namespace UrsaMinorThrottle
         private TMP_Text status, left, right, instruction, progress, aircraft, diagnostics, hints;
         private readonly TMP_Text[] optionLabels = new TMP_Text[5];
         private readonly Button[] optionButtons = new Button[5];
-        private Button calibrationTab, optionsTab;
+        private Button calibrationTab, optionsTab, helicopterTab;
         private Slider reverseSlider;
         private TMP_Text reverseLabel;
         private TMP_Text bindingLabel, bindingButtonLabel;
         private TMP_Text leverModeLabel, gateModeLabel;
+        private TMP_Text helicopterInstruction, helicopterStatus;
+        private readonly Action nextHelicopter, restartHelicopter;
         private bool singleMode, gateMode;
         private bool options, updating;
         internal bool IsOptions => options;
+        internal bool IsHelicopter { get; private set; }
         internal bool Alive => root != null;
         internal bool HasStockFont => titleSource != null && titleSource.font != null && bodySource != null && bodySource.font != null;
         internal bool HasStockPanel => frameSources.Count > 0;
         internal bool HasStockButtons => boxSource != null;
 
         internal NativeThrottlePanel(Action next, Action close, Action<int, bool> setOption, Action<float> setReversePower,
-            Action bindAirbrake, Action clearAirbrake, Action<bool, bool> setCalibrationMode)
+            Action bindAirbrake, Action clearAirbrake, Action<bool, bool> setCalibrationMode, Action nextHelicopter, Action restartHelicopter)
         { this.next = next; this.close = close; this.setOption = setOption; this.setReversePower = setReversePower;
-          this.bindAirbrake = bindAirbrake; this.clearAirbrake = clearAirbrake; this.setCalibrationMode = setCalibrationMode; }
+          this.bindAirbrake = bindAirbrake; this.clearAirbrake = clearAirbrake; this.setCalibrationMode = setCalibrationMode;
+          this.nextHelicopter = nextHelicopter; this.restartHelicopter = restartHelicopter; }
 
         internal void Open()
         {
@@ -163,12 +167,24 @@ namespace UrsaMinorThrottle
         {
             Text(panel, "KELLY'S GATES / THROTTLE SETUP", 18, 12, 664, 35, 27, green, TextAlignmentOptions.Center);
             status = Text(panel, "", 18, 48, 664, 24, 14, muted, TextAlignmentOptions.Center);
-            calibrationTab = Button(panel, "CALIBRATION", 18, 82, 324, 34, () => ShowOptions(false));
-            optionsTab = Button(panel, "OPTIONS", 350, 82, 332, 34, () => ShowOptions(true));
+            calibrationTab = Button(panel, "AIRCRAFT", 18, 82, 215, 34, () => ShowPage(0));
+            helicopterTab = Button(panel, "HELICOPTER", 242, 82, 215, 34, () => ShowPage(1));
+            optionsTab = Button(panel, "OPTIONS", 466, 82, 216, 34, () => ShowPage(2));
             calibrationPage = Rect("Calibration", panel).gameObject;
             Stretch(calibrationPage.GetComponent<RectTransform>());
             optionsPage = Rect("Options", panel).gameObject;
             Stretch(optionsPage.GetComponent<RectTransform>());
+            helicopterPage = Rect("Helicopter", panel).gameObject;
+            Stretch(helicopterPage.GetComponent<RectTransform>());
+            Text(helicopterPage.transform, "HELICOPTER COLLECTIVE", 18, 140, 664, 30, 19, green, TextAlignmentOptions.Center);
+            helicopterStatus = Text(helicopterPage.transform, "", 18, 185, 664, 50, 15, green, TextAlignmentOptions.Center);
+            Frame(helicopterPage.transform, 18, 260, 664, 120);
+            helicopterInstruction = Text(helicopterPage.transform, "", 30, 272, 640, 96, 17, green, TextAlignmentOptions.TopLeft);
+            Text(helicopterPage.transform, "TWO CAPTURES: ZERO  /  MAXIMUM", 18, 410, 664, 35, 15, muted, TextAlignmentOptions.Center);
+            Button(helicopterPage.transform, "CAPTURE", 18, 556, 220, 38, nextHelicopter);
+            Button(helicopterPage.transform, "RESTART", 248, 556, 150, 38, restartHelicopter);
+            Button(helicopterPage.transform, "CLOSE", 408, 556, 150, 38, close);
+            Text(helicopterPage.transform, "F9 CLOSES   •   F10 CAPTURES", 18, 612, 664, 25, 12, muted);
             leverModeLabel = Button(calibrationPage.transform, "", 18, 128, 324, 34, () => setCalibrationMode(!singleMode, gateMode)).GetComponentInChildren<TMP_Text>();
             gateModeLabel = Button(calibrationPage.transform, "", 350, 128, 332, 34, () => setCalibrationMode(singleMode, !gateMode)).GetComponentInChildren<TMP_Text>();
             Text(calibrationPage.transform, "LEVER DETECTION", 18, 169, 664, 22, 16, green);
@@ -211,6 +227,12 @@ namespace UrsaMinorThrottle
         }
 
         private readonly bool[] optionValues = new bool[5];
+        internal void RefreshHelicopter(bool saved, string instruction)
+        {
+            if (root == null) return;
+            helicopterStatus.text = saved ? "HELICOPTER CALIBRATION SAVED" : "HELICOPTER CALIBRATION REQUIRED";
+            helicopterInstruction.text = instruction;
+        }
         internal void Refresh(bool calibrated, bool enabled, string leftInfo, string rightInfo, string message,
             CalibrationPhase phase, string shortcut, string aircraftInfo, string detail, bool[] settings, float reversePower,
             bool capturingButton, string buttonDescription, bool singleLever, bool hasReverseGate)
@@ -254,9 +276,13 @@ namespace UrsaMinorThrottle
 
         private void ShowOptions(bool show)
         {
-            options = show;
-            calibrationPage.SetActive(!show); optionsPage.SetActive(show);
-            SetTab(calibrationTab, !show); SetTab(optionsTab, show);
+            ShowPage(show ? 2 : 0);
+        }
+        private void ShowPage(int page)
+        {
+            options = page == 2; IsHelicopter = page == 1;
+            calibrationPage.SetActive(page == 0); helicopterPage.SetActive(page == 1); optionsPage.SetActive(options);
+            SetTab(calibrationTab, page == 0); SetTab(helicopterTab, IsHelicopter); SetTab(optionsTab, options);
         }
         private void SetTab(Button button, bool active)
         {

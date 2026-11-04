@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace UrsaMinorThrottle
 {
-    [BepInPlugin(Id, "Kelly's GATES", "0.6.0")]
+    [BepInPlugin(Id, "Kelly's GATES", "0.7.1")]
     [BepInDependency("experimental.assassin1076.extrainputframework", BepInDependency.DependencyFlags.HardDependency)]
     public sealed class Plugin : BaseUnityPlugin
     {
@@ -32,7 +32,20 @@ namespace UrsaMinorThrottle
             internal Guid Instance, Hardware;
             internal int Axis;
             internal bool Valid;
+            internal Joystick Device;
+            internal int Index;
+            internal string Description;
         }
+        private struct DirectButtonId
+        {
+            internal bool Valid, Keyboard;
+            internal KeyCode Key;
+            internal Guid Instance, Hardware;
+            internal int Button, Index;
+            internal Joystick Device;
+            internal string Description;
+        }
+        private static readonly Dictionary<string, DirectButtonId> DirectButtons = new Dictionary<string, DirectButtonId>();
 
         private ConfigEntry<bool> packEnabled;
         private ConfigEntry<bool> calibrated;
@@ -40,12 +53,38 @@ namespace UrsaMinorThrottle
         private ConfigEntry<bool> holdAirbrake, idleAirbrake, splitThrottles, reverseEnabled;
         private ConfigEntry<string> airbrakeBinding;
         private ConfigEntry<float> reversePower;
+        private ConfigEntry<bool> collectiveCalibrated;
+        private ConfigEntry<string> collectiveBinding;
+        private ConfigEntry<float> collectiveZero, collectiveMaximum;
+        private CollectiveCalibration collectiveWizard;
+        private bool collectivePending, collectiveActive, collectiveFocusFrozen, collectiveAwaitZero = true;
+        private float collectiveHeld;
+        private int collectiveFrame;
+        private Aircraft collectiveAircraft, collectiveClassifiedAircraft;
+        private bool classifiedHelicopter;
+        private int nextHelicopterScan;
+        private bool helicopterScanLogged;
         private ConfigEntry<KeyboardShortcut> showCalibration;
         private ConfigEntry<KeyboardShortcut> advanceCalibration;
         private LeverConfig leftConfig, rightConfig;
         private bool windowOpen, airbrakeLatched, airbrakeHeld, airbrakeCanPress, awaitIdleAfterCalibration, pendingAdvance, hooksReady;
         private bool focusFrozen, focusReverse, forcedCursor;
+        private readonly FocusPickup focusPickup = new FocusPickup();
         private string lastAirbrakeBindingStatus;
+        private sealed class MappedButton { internal ControllerMap Map; internal ActionElementMap Element; internal int ActionId; }
+        private readonly List<MappedButton> mappedAirbrakes = new List<MappedButton>();
+        private Player mappedAirbrakePlayer;
+        private float nextAirbrakeMapScan;
+        private int debugMapCategory = -1;
+        private sealed class LegacyBindingCache
+        {
+            internal Player Player;
+            internal Controller Controller;
+            internal string Key, Physical, Description;
+            internal float NextScan;
+            internal bool Valid;
+        }
+        private readonly LegacyBindingCache legacyLeft = new LegacyBindingCache(), legacyRight = new LegacyBindingCache();
         private ButtonDetector buttonDetector;
         private string buttonCaptureMessage = "";
         private float buttonCaptureReadyAt;
@@ -61,16 +100,18 @@ namespace UrsaMinorThrottle
         private string leftDescription = "not bound", rightDescription = "not bound";
         private float leftRaw, rightRaw;
         private int lastAircraftScan = -1;
+        private int cachedEngineCount = -1, cachedEngineStateCount = -1;
         private Aircraft cachedAircraft, armingAircraft;
         private float? leftBurner, rightBurner;
         private bool nativeReverse;
         private float nativeReverseSpeedLimit;
         private string engineTopology = "not scanned";
+        private string activeEngineStatus = "active";
         private readonly HashSet<string> reportedHookFailures = new HashSet<string>();
         private readonly HashSet<Component> reverseEngines = new HashSet<Component>();
         private readonly HashSet<Component> reportedEngines = new HashSet<Component>();
         private string lastFlightStatus;
-        private bool leftMilReported, rightMilReported;
+        private bool leftMilReported, rightMilReported, leftBurnerReported, rightBurnerReported;
 
         internal Aircraft ActiveAircraft { get; private set; }
         internal bool Active { get; private set; }
@@ -81,6 +122,14 @@ namespace UrsaMinorThrottle
         internal float RightPower { get; private set; }
         internal int ActiveFrame { get; private set; }
         internal bool IsNativeReverseEngine(Component engine) => reverseEngines.Contains(engine);
+
+        internal bool TryGaugeValue(Aircraft aircraft, float input, float displayStart, out float display)
+        {
+            display = input;
+            if (!ControlsAircraft(aircraft, true) || ReverseActive || !leftBurner.HasValue || !rightBurner.HasValue ||
+                Math.Abs(leftBurner.Value - rightBurner.Value) > .001f) return false;
+            return GaugeCurve.TryMap(input, (leftBurner.Value + rightBurner.Value) * .5f, displayStart, out display);
+        }
 
         internal static bool IsFlightSession(GameState state) =>
             state == GameState.SinglePlayer || state == GameState.Multiplayer;
@@ -113,6 +162,10 @@ namespace UrsaMinorThrottle
             advanceCalibration = Config.Bind("Calibration", "Capture", new KeyboardShortcut(KeyCode.F10), "Advance and capture the current lever positions.");
             leftConfig = new LeverConfig(Config, "Left lever");
             rightConfig = new LeverConfig(Config, "Right lever");
+            collectiveCalibrated = Config.Bind("Helicopter", "Complete", false, "Set by the helicopter calibration screen.");
+            collectiveBinding = Config.Bind("Helicopter", "Axis", "", "Detected helicopter collective axis.");
+            collectiveZero = Config.Bind("Helicopter", "Zero", 0f, "Captured zero collective.");
+            collectiveMaximum = Config.Bind("Helicopter", "Maximum", 0f, "Captured maximum collective.");
             // Do not take over at an arbitrary lever position after a game restart.
             awaitIdleAfterCalibration = calibrated.Value;
 
@@ -158,6 +211,7 @@ namespace UrsaMinorThrottle
 
         private void OnDestroy()
         {
+            EngineThrottlePatch.Clear();
             try { managerShortcutHarmony?.UnpatchSelf(); }
             catch (Exception e) { Logger.LogWarning("Could not remove Configuration Manager shortcut patch: " + e); }
             ClosePanel();
@@ -207,9 +261,34 @@ namespace UrsaMinorThrottle
                 if (panel == null || !panel.Alive) { ClosePanel(); return; }
                 if (buttonDetector != null && !panel.IsOptions) buttonDetector = null;
                 if (buttonDetector != null) CaptureAirbrakeButton();
-                var snapshot = SnapshotThrottleAxes();
+                if (panel.IsHelicopter)
+                {
+                    if (ShortcutKeys.IsDown(advanceCalibration.Value) || collectivePending)
+                    {
+                        collectivePending = false;
+                        if (collectiveWizard.Next(SnapshotThrottleAxes()))
+                        {
+                            // Save only once both endpoints and the selected axis are valid.
+                            collectiveCalibrated.Value = false;
+                            collectiveBinding.Value = collectiveWizard.Binding;
+                            collectiveZero.Value = collectiveWizard.Zero;
+                            collectiveMaximum.Value = collectiveWizard.Maximum;
+                            collectiveCalibrated.Value = true;
+                            Config.Save(); collectiveAwaitZero = true;
+                            Logger.LogInfo("Helicopter collective calibration saved; return the lever to zero before activation.");
+                        }
+                    }
+                    panel.Refresh(collectiveCalibrated.Value, packEnabled.Value, "", "", "", wizard.Phase, "", engineTopology, "",
+                        new[] { packEnabled.Value, splitThrottles.Value, idleAirbrake.Value, holdAirbrake.Value, reverseEnabled.Value }, reversePower.Value,
+                        false, "", wizard.SingleLever, wizard.HasReverseGate);
+                    panel.RefreshHelicopter(collectiveCalibrated.Value, collectiveWizard.Message);
+                    return;
+                }
+                bool advance = !panel.IsOptions && (ShortcutKeys.IsDown(advanceCalibration.Value) || pendingAdvance);
+                bool detecting = !panel.IsOptions && (wizard.Phase == CalibrationPhase.DetectingLeft || wizard.Phase == CalibrationPhase.DetectingRight);
+                var snapshot = advance || detecting ? SnapshotThrottleAxes() : null;
                 string oldLeft = wizard.LeftKey, oldRight = wizard.RightKey;
-                wizard.Observe(snapshot);
+                if (snapshot != null) wizard.Observe(snapshot);
                 if (wizard.LeftKey != oldLeft) Logger.LogInfo("Detected left throttle axis: " + wizard.LeftKey);
                 if (wizard.RightKey != oldRight) Logger.LogInfo("Detected right throttle axis: " + wizard.RightKey);
                 if (wizard.LeftKey != null && TryReadDirect(wizard.LeftKey, out var l, out var leftName))
@@ -220,7 +299,7 @@ namespace UrsaMinorThrottle
                 { rightRaw = r; rightDescription = rightName; }
                 else if (wizard.RightKey == null) rightDescription = "not detected";
                 else rightDescription = "device/axis unavailable";
-                if ((!panel.IsOptions && ShortcutKeys.IsDown(advanceCalibration.Value)) || pendingAdvance)
+                if (advance)
                 {
                     pendingAdvance = false;
                     AdvanceWizard(snapshot);
@@ -244,19 +323,24 @@ namespace UrsaMinorThrottle
 
         private void OnApplicationFocus(bool focused)
         {
+            nextAirbrakeMapScan = 0f;
+            legacyLeft.NextScan = legacyRight.NextScan = 0f;
             if (!focused)
             {
                 // Losing focus can neutralise inputs and make held hardware switches
                 // look newly pressed on return; cancel capture without changing binding.
                 buttonDetector = null;
-                // Never freeze an unarmed or stale command. Keep the last controlled output
-                // until the user returns and brings both levers to idle.
-                focusFrozen = Active && LeverControl && !windowOpen && Time.frameCount - ActiveFrame >= 0 && Time.frameCount - ActiveFrame <= 1;
-                focusReverse = focusFrozen && ReverseActive;
+                // Repeated focus loss while already holding must preserve the last controlled output.
+                bool alreadyFrozen = focusFrozen;
+                focusFrozen = alreadyFrozen || (Active && LeverControl && !windowOpen && Time.frameCount - ActiveFrame >= 0 && Time.frameCount - ActiveFrame <= 1);
+                if (focusFrozen && !alreadyFrozen) focusReverse = ReverseActive;
+                collectiveFocusFrozen = collectiveFocusFrozen || (collectiveActive && !windowOpen && Time.frameCount - collectiveFrame >= 0 && Time.frameCount - collectiveFrame <= 1);
+                focusPickup.Lost();
                 airbrakeHeld = false;
                 airbrakeCanPress = false;
-                if (focusFrozen) Logger.LogInfo("Focus lost: holding last throttle output until both levers return to idle.");
+                if (focusFrozen) Logger.LogInfo("Focus lost: holding last throttle output until focus and valid input return.");
             }
+            else if (focusFrozen || collectiveFocusFrozen) focusPickup.Restored(Time.frameCount);
         }
 
         private void PollAirbrakeButton()
@@ -264,6 +348,7 @@ namespace UrsaMinorThrottle
             if (!Application.isFocused || windowOpen || focusFrozen || !Active || activePlayer == null || !hooksReady || !packEnabled.Value ||
                 !GameManager.flightControlsEnabled || !ControlsAircraft(ActiveAircraft, false))
             {
+                nextAirbrakeMapScan = 0f;
                 airbrakeHeld = false;
                 airbrakeCanPress = false;
                 return;
@@ -293,23 +378,35 @@ namespace UrsaMinorThrottle
             // The user-assigned action lives on the game's Debug map. That map can be
             // disabled during flight, so read only this explicitly mapped button even
             // then; do not enable the map or activate other Debug actions.
-            int debugMap = -1;
-            try { debugMap = ReInput.mapping.GetMapCategoryId("Debug"); }
-            catch (Exception) { /* Category 3 is the observed action map on this build. */ }
-            int bindings = 0, disabledDebug = 0;
-            foreach (var map in activePlayer.controllers.maps.GetAllMaps(ControllerType.Joystick))
+            if (mappedAirbrakePlayer != activePlayer || Time.unscaledTime >= nextAirbrakeMapScan)
             {
-                if (map.controller == null || !ControlPolicies.ReadAirbrakeMap(map.enabled, map.categoryId, debugMap)) continue;
-                foreach (var element in map.GetElementMapsWithAction(AirbrakeAction))
+                mappedAirbrakePlayer = activePlayer; nextAirbrakeMapScan = Time.unscaledTime + .5f;
+                mappedAirbrakes.Clear();
+                try { debugMapCategory = ReInput.mapping.GetMapCategoryId("Debug"); }
+                catch (Exception) { debugMapCategory = -1; }
+                int disabledDebug = 0;
+                foreach (var map in activePlayer.controllers.maps.GetAllMaps(ControllerType.Joystick))
                 {
-                    if (!element.enabled || element.hasModifiers || element.elementType != ControllerElementType.Button) continue;
-                    bindings++;
-                    if (!map.enabled) disabledDebug++;
-                    if (map.controller.GetButtonById(element.elementIdentifierId)) down = true;
+                    if (map.controller == null || !ControlPolicies.ReadAirbrakeMap(map.enabled, map.categoryId, debugMapCategory)) continue;
+                    foreach (var element in map.GetElementMapsWithAction(AirbrakeAction))
+                    {
+                        if (!element.enabled || element.hasModifiers || element.elementType != ControllerElementType.Button) continue;
+                        mappedAirbrakes.Add(new MappedButton { Map = map, Element = element, ActionId = element.actionId });
+                        if (!map.enabled) disabledDebug++;
+                    }
                 }
+                string bindingStatus = "Airbrake binding: " + mappedAirbrakes.Count + " joystick button(s), " + disabledDebug + " on an inactive action map.";
+                if (bindingStatus != lastAirbrakeBindingStatus) { lastAirbrakeBindingStatus = bindingStatus; Logger.LogInfo(bindingStatus); }
             }
-            string bindingStatus = "Airbrake binding: " + bindings + " joystick button(s), " + disabledDebug + " on an inactive action map.";
-            if (bindingStatus != lastAirbrakeBindingStatus) { lastAirbrakeBindingStatus = bindingStatus; Logger.LogInfo(bindingStatus); }
+            foreach (var binding in mappedAirbrakes)
+            {
+                var controller = binding.Map.controller;
+                var element = binding.Element;
+                if (controller == null || !controller.isConnected) { nextAirbrakeMapScan = 0f; continue; }
+                if (!ControlPolicies.ReadAirbrakeMap(binding.Map.enabled, binding.Map.categoryId, debugMapCategory) ||
+                    !element.enabled || element.actionId != binding.ActionId || element.hasModifiers || element.elementType != ControllerElementType.Button) continue;
+                if (controller.GetButtonById(element.elementIdentifierId)) down = true;
+            }
             return down;
         }
 
@@ -318,13 +415,18 @@ namespace UrsaMinorThrottle
             if (windowOpen) { ClosePanel(); return; }
             pendingAdvance = false;
             focusFrozen = false;
+            collectiveFocusFrozen = false;
+            collectiveAwaitZero = true;
             if (calibrated.Value) awaitIdleAfterCalibration = true;
             wizard = new CalibrationWizard(singleLever.Value, !leftConfig.Read().NoReverseGate);
+            collectiveWizard = new CollectiveCalibration();
+            collectivePending = false;
             message = wizard.Message;
             try
             {
                 panel = new NativeThrottlePanel(() => pendingAdvance = true, ClosePanel, SetPanelOption, SetPanelReversePower,
-                    StartOrCancelAirbrakeCapture, ClearAirbrakeBinding, SetCalibrationMode);
+                    StartOrCancelAirbrakeCapture, ClearAirbrakeBinding, SetCalibrationMode,
+                    () => collectivePending = true, () => { collectiveWizard = new CollectiveCalibration(); collectivePending = false; });
                 panel.Open();
                 windowOpen = true;
                 CursorManager.SetFlag(PanelCursor, true);
@@ -362,6 +464,8 @@ namespace UrsaMinorThrottle
                 forcedCursor = false;
             }
             wizard = null;
+            collectiveWizard = null;
+            collectivePending = false;
             if (wasOpen) Logger.LogInfo("Calibration panel closed.");
         }
 
@@ -474,26 +578,46 @@ namespace UrsaMinorThrottle
         {
             down = false; description = "not available";
             if (string.IsNullOrEmpty(binding)) return false;
-            var parts = binding.Split('|');
-            if (parts.Length == 2 && parts[0] == "key1" && int.TryParse(parts[1], out int code) && code >= 8 && code <= 319)
+            if (!DirectButtons.TryGetValue(binding, out var saved))
+            {
+                var parts = binding.Split('|');
+                if (parts.Length == 2 && parts[0] == "key1" && int.TryParse(parts[1], out int code) && code >= 8 && code <= 319)
+                { saved.Valid = saved.Keyboard = true; saved.Key = (KeyCode)code; saved.Description = "KEYBOARD / " + saved.Key; }
+                else if (parts.Length == 4 && parts[0] == "joy1" && Guid.TryParse(parts[1], out saved.Instance) && saved.Instance != Guid.Empty &&
+                    Guid.TryParse(parts[2], out saved.Hardware) && int.TryParse(parts[3], out saved.Button) && saved.Button >= 0)
+                    saved.Valid = true;
+                if (DirectButtons.Count >= 128) DirectButtons.Clear();
+                DirectButtons[binding] = saved;
+            }
+            if (!saved.Valid) return false;
+            if (saved.Keyboard)
             {
                 var input = UnityInput.Current;
                 if (input == null) return false;
-                var key = (KeyCode)code; down = input.GetKey(key); description = "KEYBOARD / " + key; return true;
+                down = input.GetKey(saved.Key); description = saved.Description; return true;
             }
-            if (parts.Length != 4 || parts[0] != "joy1" || !Guid.TryParse(parts[1], out var instance) || instance == Guid.Empty ||
-                !Guid.TryParse(parts[2], out var hardware) || !int.TryParse(parts[3], out int id) || id < 0 || !ReInput.isReady) return false;
-            foreach (var joystick in ReInput.controllers.Joysticks)
+            if (!ReInput.isReady) return false;
+            var joystick = saved.Device;
+            if (joystick == null || !joystick.isConnected || joystick.deviceInstanceGuid != saved.Instance || joystick.hardwareTypeGuid != saved.Hardware || saved.Index < 0 || saved.Index >= joystick.buttonCount ||
+                saved.Index >= joystick.Buttons.Count || joystick.Buttons[saved.Index]?.elementIdentifier == null ||
+                joystick.Buttons[saved.Index].elementIdentifier.id != saved.Button)
             {
-                if (joystick == null || joystick.deviceInstanceGuid != instance || joystick.hardwareTypeGuid != hardware) continue;
-                int index = joystick.GetButtonIndexById(id);
-                if (index < 0 || index >= joystick.buttonCount || index >= joystick.Buttons.Count ||
-                    joystick.Buttons[index]?.elementIdentifier == null || joystick.Buttons[index].elementIdentifier.id != id) return false;
-                down = joystick.GetButton(index);
-                description = joystick.name + " / " + joystick.Buttons[index].elementIdentifier.name;
-                return true;
+                saved.Device = null;
+                foreach (var candidate in ReInput.controllers.Joysticks)
+                {
+                    if (candidate == null || !candidate.isConnected || candidate.deviceInstanceGuid != saved.Instance || candidate.hardwareTypeGuid != saved.Hardware) continue;
+                    int index = candidate.GetButtonIndexById(saved.Button);
+                    if (index < 0 || index >= candidate.buttonCount || index >= candidate.Buttons.Count ||
+                        candidate.Buttons[index]?.elementIdentifier == null || candidate.Buttons[index].elementIdentifier.id != saved.Button) continue;
+                    saved.Device = candidate; saved.Index = index;
+                    saved.Description = candidate.name + " / " + candidate.Buttons[index].elementIdentifier.name;
+                    break;
+                }
+                DirectButtons[binding] = saved;
+                joystick = saved.Device;
+                if (joystick == null) return false;
             }
-            return false;
+            down = joystick.GetButton(saved.Index); description = saved.Description; return true;
         }
 
         private void AdvanceWizard(IDictionary<string, float> snapshot)
@@ -516,7 +640,7 @@ namespace UrsaMinorThrottle
             calibrated.Value = true;
             Config.Save();
             awaitIdleAfterCalibration = true;
-            leftMilReported = rightMilReported = false;
+            leftMilReported = rightMilReported = leftBurnerReported = rightBurnerReported = false;
             Logger.LogInfo("Both throttle axes calibrated; return both levers to idle before activation.");
         }
 
@@ -557,18 +681,27 @@ namespace UrsaMinorThrottle
                 DirectIds[key] = id;
             }
             if (!id.Valid) return false;
-            foreach (var joystick in ReInput.controllers.Joysticks)
+            var joystick = id.Device;
+            if (joystick == null || !joystick.isConnected || joystick.deviceInstanceGuid != id.Instance || joystick.hardwareTypeGuid != id.Hardware || id.Index < 0 || id.Index >= joystick.axisCount ||
+                id.Index >= joystick.Axes.Count || joystick.Axes[id.Index]?.elementIdentifier == null ||
+                joystick.Axes[id.Index].elementIdentifier.id != id.Axis)
             {
-                if (joystick == null || joystick.deviceInstanceGuid != id.Instance || joystick.hardwareTypeGuid != id.Hardware) continue;
-                int index = joystick.GetAxisIndexById(id.Axis);
-                if (index < 0 || index >= joystick.axisCount || index >= joystick.Axes.Count) return false;
-                var axis = joystick.Axes[index];
-                if (axis?.elementIdentifier == null || axis.elementIdentifier.id != id.Axis) return false;
-                value = joystick.GetAxisRaw(index);
-                description = joystick.name + " / " + axis.elementIdentifier.name;
-                return !float.IsNaN(value) && !float.IsInfinity(value) && value >= -1.001f && value <= 1.001f;
+                id.Device = null;
+                foreach (var candidate in ReInput.controllers.Joysticks)
+                {
+                    if (candidate == null || !candidate.isConnected || candidate.deviceInstanceGuid != id.Instance || candidate.hardwareTypeGuid != id.Hardware) continue;
+                    int index = candidate.GetAxisIndexById(id.Axis);
+                    if (index < 0 || index >= candidate.axisCount || index >= candidate.Axes.Count ||
+                        candidate.Axes[index]?.elementIdentifier == null || candidate.Axes[index].elementIdentifier.id != id.Axis) continue;
+                    id.Device = candidate; id.Index = index;
+                    id.Description = candidate.name + " / " + candidate.Axes[index].elementIdentifier.name;
+                    break;
+                }
+                DirectIds[key] = id; joystick = id.Device;
+                if (joystick == null) return false;
             }
-            return false;
+            value = joystick.GetAxisRaw(id.Index); description = id.Description;
+            return !float.IsNaN(value) && !float.IsInfinity(value) && value >= -1.001f && value <= 1.001f;
         }
 
         internal void OnPilot(PilotPlayerState state)
@@ -577,7 +710,9 @@ namespace UrsaMinorThrottle
             {
                 if (!hooksReady || !packEnabled.Value || !IsFlightSession(GameManager.gameState))
                 {
+                    EngineThrottlePatch.Clear(); cachedAircraft = null;
                     Active = false; LeverControl = false; ReverseActive = false; focusFrozen = false;
+                    collectiveActive = false; collectiveFocusFrozen = false; collectiveAwaitZero = true;
                     awaitIdleAfterCalibration = true; airbrakeLatched = false;
                     ReportFlightStatus("inactive: disabled, missing hooks, or outside a flight session");
                     return;
@@ -589,6 +724,17 @@ namespace UrsaMinorThrottle
                 var inputs = InputsField.GetValue(state) as ControlInputs;
                 // Other player states must not clear the current local aircraft's controls.
                 if (player == null || aircraft == null || inputs == null || !GameManager.IsLocalAircraft(aircraft)) return;
+                if (collectiveFocusFrozen && collectiveAircraft == aircraft && !windowOpen && aircraft.LocalSim &&
+                    (!Application.isFocused || !focusPickup.Ready(Time.frameCount)))
+                {
+                    WriteCollective(state, inputs, collectiveHeld);
+                    collectiveActive = true; collectiveFrame = Time.frameCount;
+                    ReportFlightStatus("holding helicopter collective while focus returns");
+                    return;
+                }
+                if (collectiveFocusFrozen && (collectiveAircraft != aircraft || windowOpen || !aircraft.LocalSim))
+                    collectiveFocusFrozen = false;
+                collectiveActive = false;
                 if (focusFrozen && ActiveAircraft == aircraft && !windowOpen && aircraft.LocalSim)
                 {
                     if (!Application.isFocused)
@@ -599,10 +745,10 @@ namespace UrsaMinorThrottle
                         SimThrottleField.SetValue(state, PlayerSettings.throttleUseNegative ? held * 2f - 1f : held);
                         inputs.throttle = held;
                         Active = true; LeverControl = true; ActiveFrame = Time.frameCount;
-                        ReportFlightStatus("holding throttle while unfocused; return both levers to idle after refocusing");
+                        ReportFlightStatus("holding throttle while unfocused");
                         return;
                     }
-                    // Keep the prior output in the engine hook while waiting for valid idle input.
+                    // Keep the prior output in the engine hook until the physical levers are reacquired.
                 }
                 else focusFrozen = false;
                 Active = false;
@@ -618,8 +764,10 @@ namespace UrsaMinorThrottle
                 if (!reportedLocalPilot) { Logger.LogInfo("Throttle controls reached the local player aircraft."); reportedLocalPilot = true; }
                 if (armingAircraft != aircraft)
                 {
+                    EngineThrottlePatch.Clear(); cachedAircraft = null;
                     armingAircraft = aircraft;
                     awaitIdleAfterCalibration = true;
+                    collectiveAwaitZero = true;
                     airbrakeLatched = false;
                 }
 
@@ -630,6 +778,28 @@ namespace UrsaMinorThrottle
                     return;
                 }
 
+                if (collectiveClassifiedAircraft != aircraft)
+                {
+                    collectiveClassifiedAircraft = aircraft;
+                    classifiedHelicopter = false; nextHelicopterScan = 0; helicopterScanLogged = false;
+                }
+                bool usesCollective = (bool)CollectiveField.GetValue(state);
+                if (usesCollective && !classifiedHelicopter && Time.frameCount >= nextHelicopterScan)
+                {
+                    nextHelicopterScan = Time.frameCount + 120;
+                    classifiedHelicopter = IsHelicopter(aircraft, out string evidence);
+                    if (classifiedHelicopter || !helicopterScanLogged)
+                        Logger.LogInfo("Collective aircraft " + (aircraft.definition != null ? aircraft.definition.jsonKey : aircraft.name) +
+                            ": " + (classifiedHelicopter ? "helicopter detected via " + evidence : "rotor not yet detected; will retry"));
+                    helicopterScanLogged = true;
+                }
+                if (usesCollective && classifiedHelicopter)
+                {
+                    if (windowOpen) { collectiveFocusFrozen = false; ReportFlightStatus("stock: calibration panel is open"); return; }
+                    HandleCollective(state, inputs, aircraft, player);
+                    return;
+                }
+                collectiveFocusFrozen = false;
                 RefreshAircraft(aircraft);
                 if (windowOpen) { ReportFlightStatus("stock: calibration panel is open"); return; }
 
@@ -647,8 +817,8 @@ namespace UrsaMinorThrottle
                         message = "A calibrated throttle axis is unavailable; game controls are in use."; airbrakeLatched = false; awaitIdleAfterCalibration = true; ReportFlightStatus("stock: a calibrated throttle axis is unavailable"); return;
                     }
                 }
-                else if (!TryBinding(player, LeftAction, out leftKey, out leftPhysical, out leftDescription) ||
-                    !TryBinding(player, RightAction, out rightKey, out rightPhysical, out rightDescription) || leftPhysical == rightPhysical)
+                else if (!TryCachedBinding(legacyLeft, player, LeftAction, out leftKey, out leftPhysical, out leftDescription) ||
+                    !TryCachedBinding(legacyRight, player, RightAction, out rightKey, out rightPhysical, out rightDescription) || leftPhysical == rightPhysical)
                 {
                     if (focusFrozen) { HoldFocusOutput(state, inputs); ReportFlightStatus("holding throttle: axis bindings are unavailable after focus return"); return; }
                     message = "Open the calibration panel to detect the two throttle axes.";
@@ -696,17 +866,14 @@ namespace UrsaMinorThrottle
 
                 if (focusFrozen)
                 {
-                    if (!ThrottleCurve.BothAtIdle(l, r))
+                    if (!focusPickup.Ready(Time.frameCount))
                     {
-                        float held = (LeftPower + RightPower) * 0.5f;
-                        SimThrottleField.SetValue(state, PlayerSettings.throttleUseNegative ? held * 2f - 1f : held);
-                        inputs.throttle = held;
-                        Active = true; LeverControl = true; ReverseActive = focusReverse; ActiveFrame = Time.frameCount;
-                        ReportFlightStatus("holding throttle after focus return; move both levers to idle");
+                        HoldFocusOutput(state, inputs);
+                        ReportFlightStatus("holding throttle while input focus returns");
                         return;
                     }
                     focusFrozen = false;
-                    Logger.LogInfo("Focus restored and both levers at idle; throttle control resumed.");
+                    Logger.LogInfo("Focus restored; throttle control resumed at current lever positions.");
                 }
 
                 if (awaitIdleAfterCalibration)
@@ -761,11 +928,13 @@ namespace UrsaMinorThrottle
                 SimThrottleField.SetValue(state, PlayerSettings.throttleUseNegative ? output * 2f - 1f : output);
                 inputs.throttle = output;
                 LeverControl = true;
-                ReportFlightStatus("active; afterburner starts L/R " + FormatThreshold(leftBurner) + "/" + FormatThreshold(rightBurner) + "; " + engineTopology);
+                ReportFlightStatus(activeEngineStatus);
                 if (!ReverseActive)
                 {
                     ReportMilSample(true, leftRaw, leftConfig.Read(), LeftPower, leftBurner);
                     ReportMilSample(false, rightRaw, rightConfig.Read(), RightPower, rightBurner);
+                    ReportBurnerCrossing(true, leftRaw, leftConfig.Read(), LeftPower, leftBurner);
+                    ReportBurnerCrossing(false, rightRaw, rightConfig.Read(), RightPower, rightBurner);
                 }
             }
             catch (Exception e)
@@ -773,10 +942,75 @@ namespace UrsaMinorThrottle
                 Active = false;
                 LeverControl = false;
                 ReverseActive = false;
+                EngineThrottlePatch.Clear(); cachedAircraft = null;
+                collectiveActive = false; collectiveFocusFrozen = false; collectiveAwaitZero = true;
                 message = "Control unavailable; game controls are in use. Check the BepInEx log.";
                 ReportFlightStatus("stock: control update raised an exception");
                 if (!reportedPilotException) { Logger.LogWarning("Throttle control skipped: " + e); reportedPilotException = true; }
             }
+        }
+
+        private static bool IsHelicopter(Aircraft aircraft, out string evidence)
+        {
+            evidence = null;
+            if (aircraft == null) return false;
+            // RotorShaft registers itself with the owning aircraft during Awake;
+            // unlike a child-only lookup, this also handles detached hierarchies.
+            if (aircraft.engines != null)
+                foreach (var item in aircraft.engines)
+                    if (item is RotorShaft shaft && shaft != null && shaft.aircraft == aircraft)
+                    { evidence = "registered rotor shaft"; return true; }
+            var prefab = aircraft.definition != null ? aircraft.definition.unitPrefab : null;
+            if (prefab != null && prefab.GetComponentInChildren<RotorShaft>(true) != null)
+            { evidence = "aircraft prefab"; return true; }
+            if (aircraft.GetComponentInChildren<RotorShaft>(true) != null || aircraft.GetComponentInChildren<SwashRotor>(true) != null)
+            { evidence = "live rotor hierarchy"; return true; }
+            return false;
+        }
+
+        private void HandleCollective(PilotPlayerState state, ControlInputs inputs, Aircraft aircraft, Player player)
+        {
+            if (!collectiveCalibrated.Value || string.IsNullOrEmpty(collectiveBinding.Value))
+            {
+                collectiveAwaitZero = true;
+                ReportFlightStatus("stock: helicopter calibration required");
+                return;
+            }
+            if (!TryReadDirect(collectiveBinding.Value, out float raw, out _) ||
+                !CollectiveCalibration.TryMap(collectiveZero.Value, collectiveMaximum.Value, raw, out float output))
+            {
+                if (collectiveFocusFrozen)
+                {
+                    WriteCollective(state, inputs, collectiveHeld);
+                    collectiveActive = true; collectiveFrame = Time.frameCount;
+                    ReportFlightStatus("holding helicopter collective: axis unavailable after focus return");
+                }
+                else { collectiveAwaitZero = true; ReportFlightStatus("stock: helicopter axis unavailable or invalid"); }
+                return;
+            }
+            if (collectiveFocusFrozen)
+            {
+                collectiveFocusFrozen = false;
+                Logger.LogInfo("Focus restored; helicopter collective resumed at current lever position.");
+            }
+            if (collectiveAwaitZero)
+            {
+                if (output > .02f) { ReportFlightStatus("stock: return helicopter collective to zero to activate"); return; }
+                collectiveAwaitZero = false;
+            }
+            if (player.GetButton("Axis Modifier")) { ReportFlightStatus("stock: Axis Modifier is held"); return; }
+            WriteCollective(state, inputs, output);
+            collectiveHeld = output; collectiveAircraft = aircraft;
+            collectiveActive = true; collectiveFrame = Time.frameCount;
+            ReportFlightStatus("active: helicopter collective");
+        }
+
+        private static void WriteCollective(PilotPlayerState state, ControlInputs inputs, float output)
+        {
+            // The game applies these settings to simulatedThrottle before writing the
+            // effective collective; retain its internal state in the corresponding domain.
+            SimThrottleField.SetValue(state, CollectiveCalibration.NativeThrottle(output, PlayerSettings.invertCollective, PlayerSettings.throttleUseNegative));
+            inputs.throttle = output;
         }
 
         private void HoldFocusOutput(PilotPlayerState state, ControlInputs inputs)
@@ -811,6 +1045,15 @@ namespace UrsaMinorThrottle
                 ", engine command=" + command.ToString("F3") + ", burner start=" + FormatThreshold(threshold) + ".");
         }
 
+        private void ReportBurnerCrossing(bool left, float raw, Detents detents, float command, float? threshold)
+        {
+            if ((left ? leftBurnerReported : rightBurnerReported) || !threshold.HasValue || command <= threshold.Value) return;
+            if (left) leftBurnerReported = true; else rightBurnerReported = true;
+            Logger.LogInfo("Burner threshold crossed " + (left ? "left" : "right") + ": raw=" + raw.ToString("F3") +
+                ", calibrated MIL=" + detents.Mil.ToString("F3") + ", engine command=" + command.ToString("F3") +
+                ", burner start=" + threshold.Value.ToString("F3") + ". Flame visibility also depends on engine RPM and smoothing.");
+        }
+
         internal void ReportEngineOverride(Component engine, float x)
         {
             if (reportedEngines.Add(engine))
@@ -826,10 +1069,23 @@ namespace UrsaMinorThrottle
             return burner.HasValue ? Math.Min(requested, Math.Max(0f, burner.Value - 0.01f)) : requested;
         }
 
-        private static bool TryBinding(Player player, string action, out string key, out string physicalKey, out string description)
+        private static bool TryCachedBinding(LegacyBindingCache cache, Player player, string action, out string key, out string physicalKey, out string description)
+        {
+            float now = Time.unscaledTime;
+            if (cache.Player != player || now >= cache.NextScan || (cache.Controller != null && !cache.Controller.isConnected))
+            {
+                cache.Player = player; cache.NextScan = now + .5f;
+                cache.Valid = TryBinding(player, action, out cache.Key, out cache.Physical, out cache.Description, out cache.Controller);
+            }
+            key = cache.Key; physicalKey = cache.Physical; description = cache.Description;
+            return cache.Valid;
+        }
+
+        private static bool TryBinding(Player player, string action, out string key, out string physicalKey, out string description, out Controller resolvedController)
         {
             key = null;
             physicalKey = null;
+            resolvedController = null;
             description = "not bound";
             foreach (var map in player.controllers.maps.GetAllMaps(ControllerType.Joystick))
             {
@@ -844,6 +1100,7 @@ namespace UrsaMinorThrottle
                     if (key != null) { description = "more than one active axis binding"; return false; }
                     key = candidate;
                     physicalKey = physical;
+                    resolvedController = controller;
                     description = controller.name + " / " + element.elementIdentifierName;
                 }
             }
@@ -852,14 +1109,18 @@ namespace UrsaMinorThrottle
 
         private void RefreshAircraft(Aircraft aircraft)
         {
-            if (cachedAircraft == aircraft && Time.frameCount - lastAircraftScan < 120) return;
+            int engineCount = aircraft.engines != null ? aircraft.engines.Count : 0;
+            int stateCount = aircraft.engineStates != null ? aircraft.engineStates.Count : 0;
+            if (cachedAircraft == aircraft && Time.frameCount - lastAircraftScan < 120 &&
+                cachedEngineCount == engineCount && cachedEngineStateCount == stateCount) return;
             if (cachedAircraft != aircraft)
             {
                 reportedEngines.Clear();
-                leftMilReported = rightMilReported = false;
+                leftMilReported = rightMilReported = leftBurnerReported = rightBurnerReported = false;
             }
             cachedAircraft = aircraft;
             lastAircraftScan = Time.frameCount;
+            cachedEngineCount = engineCount; cachedEngineStateCount = stateCount;
             leftBurner = rightBurner = null;
             nativeReverse = false;
             nativeReverseSpeedLimit = 0f;
@@ -871,6 +1132,7 @@ namespace UrsaMinorThrottle
             children.AddRange(aircraft.GetComponentsInChildren<PropFan>(true));
             var engines = OwnedDiscovery.Merge(NativeReflection.RegisteredEngines(aircraft), children,
                 engine => NativeReflection.BelongsTo(aircraft, engine));
+            EngineThrottlePatch.Rebuild(aircraft, engines);
             var nozzles = new HashSet<JetNozzle>();
             foreach (var engine in engines)
             {
@@ -905,6 +1167,7 @@ namespace UrsaMinorThrottle
                 if (x < -0.1f) left++; else if (x > 0.1f) right++; else center++;
             }
             engineTopology = "Engines L/R/centre: " + left + "/" + right + "/" + center + " (centre/shared uses average)";
+            activeEngineStatus = "active; afterburner starts L/R " + FormatThreshold(leftBurner) + "/" + FormatThreshold(rightBurner) + "; " + engineTopology;
         }
 
         private static float? Minimum(float? a, float b) => !a.HasValue ? b : Math.Min(a.Value, b);
@@ -915,10 +1178,19 @@ namespace UrsaMinorThrottle
             {
                 if (!hooksReady && IsFlightSession(GameManager.gameState))
                     GUI.Box(new Rect(24, Screen.height - 72, 360, 38), "THROTTLE PACK INACTIVE — CHECK BEPINEX LOG");
+                else if (classifiedHelicopter && collectiveClassifiedAircraft == armingAircraft && IsFlightSession(GameManager.gameState))
+                {
+                    if (!collectiveCalibrated.Value)
+                        GUI.Box(new Rect(24, Screen.height - 72, 330, 38), "HELICOPTER: OPEN F9 TO CALIBRATE");
+                    else if (collectiveFocusFrozen && Application.isFocused)
+                        GUI.Box(new Rect(24, Screen.height - 72, 370, 38), "WAITING FOR VALID COLLECTIVE INPUT");
+                    else if (collectiveAwaitZero)
+                        GUI.Box(new Rect(24, Screen.height - 72, 330, 38), "RETURN COLLECTIVE TO ZERO");
+                }
                 else if (calibrated.Value && PlayerSettings.throttleUseRelative && IsFlightSession(GameManager.gameState))
                     GUI.Box(new Rect(24, Screen.height - 72, 360, 38), "DISABLE USE THROTTLE RELATIVE AXIS");
                 else if (focusFrozen && Application.isFocused && IsFlightSession(GameManager.gameState))
-                    GUI.Box(new Rect(24, Screen.height - 72, 370, 38), "RETURN BOTH LEVERS TO IDLE TO RESUME THROTTLE");
+                    GUI.Box(new Rect(24, Screen.height - 72, 370, 38), "WAITING FOR VALID THROTTLE INPUT");
                 else if (awaitIdleAfterCalibration && calibrated.Value && IsFlightSession(GameManager.gameState))
                     GUI.Box(new Rect(24, Screen.height - 72, 250, 38), "RETURN BOTH LEVERS TO IDLE");
                 else if (Active && Time.frameCount - ActiveFrame <= 1 && (AirbrakeOpen || ReverseActive))

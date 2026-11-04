@@ -23,9 +23,19 @@ Start with a safely stationary aircraft. Physical and software controller calibr
 4. Capture **OFF** behind the idle gate if enabled, **IDLE**, **MIL** at the intended dry-thrust stop, then **MAX** at full forward. Press F10 at each position. Without a physical MIL stop, select a convenient position as the software afterburner transition.
 5. Return the throttle to idle and close F9. The mod waits for idle before taking over. Closing or changing mode before a successful capture leaves the previous calibration intact.
 
-In F9 **Options**, bind an airbrake keyboard key or joystick button. The button toggles by default and can be changed to hold. Other options include airbrake at zero, split/averaged engines, native reverse and its maximum power. Reverse needs an analogue range below idle, both levers in that range, a compatible aircraft with native reverse vectoring, and a speed within the aircraft's native limit. It does not add reverse to aircraft that lack it; independent reverse per engine is not supported. Helicopter collective remains stock.
+In F9 **Options**, bind an airbrake keyboard key or joystick button. The button toggles by default and can be changed to hold. Other options include airbrake at zero, split/averaged engines, native reverse and its maximum power. Reverse needs an analogue range below idle, both levers in that range, a compatible aircraft with native reverse vectoring, and a speed within the aircraft's native limit. It does not add reverse to aircraft that lack it; independent reverse per engine is not supported.
 
-During focus loss the mod holds the last throttle command, which can still accelerate the aircraft. On focus return, aircraft change or reconnect, return the throttle to idle to re-arm. In setup, flight buttons are suppressed and last throttle held, but the simulation and flight axes remain active. Test safely.
+## Helicopter calibration
+
+Open F9 and choose **HELICOPTER**. With linked throttle levers unlocked, put the desired lever at zero collective and press **CAPTURE** or F10. Move only that lever to maximum and capture again. The axis that moved is detected automatically. Return it to zero and close F9; the separate helicopter calibration will activate in a locally controlled helicopter. If several axes move together, restart the two captures with only one moving. This calibration is independent of the fixed-wing detents and its endpoint order sets the direction regardless of the game's invert-collective setting. Helicopters use the stock controls until calibrated. GATES holds the last collective while unfocused and resumes from the physical lever after focus returns; a new aircraft, reconnection, or calibration requires zero to arm. The UI and flight behavior require in-game testing.
+
+Version 0.7.1 keeps the saved helicopter calibration from 0.7.0. Helicopter recognition checks registered rotor shafts and the aircraft prefab, and retries while aircraft load. If a helicopter still does not respond, the BepInEx log identifies the aircraft and whether a rotor and local collective control were detected.
+
+## Focus and throttle display
+
+During focus loss the mod holds the last throttle command, which can still accelerate the aircraft. On focus return it resumes at the levers' current positions once the input system has had a frame to regain focus. If you moved them while tabbed out, thrust will change to match. An aircraft change, reconnection or fresh calibration still requires returning to idle to re-arm. In setup, flight buttons are suppressed and last throttle held, but the simulation and flight axes remain active. Test safely.
+
+For aircraft whose throttle gauge uses a different afterburner boundary from their engines, the local gauge is adjusted to reflect the engine threshold when both engines use the same threshold. The actual engine command and the aircraft's own afterburner spool-up and effects are unchanged.
 
 ## Multiplayer
 
@@ -34,5 +44,7 @@ The mod targets only the local pilot's locally simulated aircraft. Separate engi
 ## Building
 
 Build `UrsaMinorThrottle.csproj` for .NET Framework 4.7.2 with the game, BepInEx and Extra Input Framework installed. Set `NUCLEAR_OPTION_DIR` or pass `/p:GameDir=...`; use `/p:InputFrameworkPath=...` if the framework is elsewhere. Game and dependency binaries are not included in the source. Offline tests: `dotnet run --project tests/CurveTests.csproj -c Release`.
+
+The optional `validation/HookAudit` project checks the installed game's control interfaces and the mod's hook contracts. Build it with the same `GameDir`, then run its executable with the project directory and game directory as arguments. This is an offline contract check, not a Unity flight test.
 
 Settings are in `BepInEx/config/com.aaron.ursaminorthrottle.cfg`. To remove GATES, close the game and remove its DLL; do not remove shared dependencies needed by other mods.
