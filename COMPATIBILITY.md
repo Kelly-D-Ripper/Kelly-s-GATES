@@ -1,6 +1,6 @@
 # Hardware compatibility — research, not test results
 
-**Only the earlier WINCTRL URSA MINOR Combat Throttle build has user-reported in-game feedback. GATES 0.6.0 itself and every other device listed here remain untested.** A manufacturer's description of a detent does not prove that Nuclear Option exposes its axis or that its gated range is usable. This is a non-exhaustive list, not a guarantee or a per-device preset.
+**WINCTRL URSA MINOR Combat Throttle has user-reported fixed-wing feedback. The 0.7.1 helicopter and performance changes still need in-game acceptance; every other device listed here remains untested.** A manufacturer's description of a detent does not prove that Nuclear Option exposes its axis or that its gated range is usable. This is a non-exhaustive list, not a guarantee or a per-device preset.
 
 | Controller | What the manufacturer describes | Suggested starting mode |
 | --- | --- | --- |

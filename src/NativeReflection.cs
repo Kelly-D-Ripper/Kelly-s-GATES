@@ -86,6 +86,20 @@ namespace UrsaMinorThrottle
             return aircraft.transform.InverseTransformPoint(transform.position).x;
         }
 
+        internal static Transform[] NozzleTransforms(Component engine)
+        {
+            var nozzles = EngineNozzles(engine);
+            if (nozzles == null || nozzles.Length == 0) return Array.Empty<Transform>();
+            var result = new List<Transform>();
+            foreach (var nozzle in nozzles)
+            {
+                if (nozzle == null) continue;
+                var transform = ThrustTransform?.GetValue(nozzle) as Transform;
+                result.Add(transform != null ? transform : nozzle.transform);
+            }
+            return result.ToArray();
+        }
+
         internal static bool SupportsReverse(DuctedThrustSystem duct, out float maxSpeed)
         {
             maxSpeed = 0f;

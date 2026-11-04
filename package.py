@@ -1,13 +1,17 @@
 from pathlib import Path
 from hashlib import sha256
 from zipfile import ZipFile, ZIP_DEFLATED
+from argparse import ArgumentParser
 
 root = Path(__file__).resolve().parent
+parser = ArgumentParser(description="Package a built GATES DLL and its documentation.")
+parser.add_argument("--dll", type=Path, default=root / "bin/Release/net472/UrsaMinorThrottle.dll")
+args = parser.parse_args()
 out = root / "release"
 out.mkdir(exist_ok=True)
-archive = out / "Kellys-GATES-0.6.0-doorman-draft.zip"
+archive = out / "Kellys-GATES-0.7.1.zip"
 sources = {
-    "UrsaMinorThrottle.dll": root / "bin/Release/net472/UrsaMinorThrottle.dll",
+    "UrsaMinorThrottle.dll": args.dll,
     "README.md": root / "README.md",
     "COMPATIBILITY.md": root / "COMPATIBILITY.md",
     "RELEASE-NOTES.md": root / "RELEASE-NOTES.md",

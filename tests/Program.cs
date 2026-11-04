@@ -40,6 +40,65 @@ static class Program
 
     static Dictionary<string, float> Axes(float left, float right) => new Dictionary<string, float> { ["left"] = left, ["right"] = right };
 
+    static void TestCollective()
+    {
+        foreach (bool reversed in new[] { false, true })
+        {
+            float zero = reversed ? 1f : -1f, max = -zero;
+            var wizard = new CollectiveCalibration();
+            Assert(!wizard.Next(Axes(zero, .1f)), "zero capture is not complete");
+            Assert(wizard.WaitingForMaximum, "zero capture starts maximum step");
+            Assert(wizard.Next(Axes(max, .1f)), "maximum capture completes calibration");
+            Assert(wizard.Binding == "left", "moved axis is selected");
+            Assert(CollectiveCalibration.TryMap(wizard.Zero, wizard.Maximum, zero, out var v), "zero maps"); Near(v, 0, "collective zero");
+            Assert(CollectiveCalibration.TryMap(zero, max, 0, out v), "middle maps"); Near(v, .5f, "collective midpoint");
+            Assert(CollectiveCalibration.TryMap(zero, max, max, out v), "max maps"); Near(v, 1, "collective maximum");
+        }
+        var ambiguous = new CollectiveCalibration();
+        ambiguous.Next(Axes(-1, -1));
+        Assert(!ambiguous.Next(Axes(1, 1)), "linked axis capture must fail");
+        Assert(!ambiguous.Next(Axes(-1, -1)), "no movement must fail");
+        Assert(ambiguous.Next(Axes(1, -1)), "independent motion can be retried");
+        Assert(!CollectiveCalibration.TryMap(0, 0, 0, out _), "collapsed range is invalid");
+        Assert(!CollectiveCalibration.TryMap(-1, 1, float.NaN, out _), "NaN axis is invalid");
+        Assert(!CollectiveCalibration.TryMap(-1, float.PositiveInfinity, 0, out _), "invalid endpoint rejected");
+        Assert(CollectiveCalibration.TryMap(-.8f, .8f, 1f, out var clamped), "overtravel maps"); Near(clamped, 1, "overtravel clamped");
+        Near(CollectiveCalibration.NativeThrottle(.3f, false, false), .3f, "normal native");
+        Near(CollectiveCalibration.NativeThrottle(.3f, true, false), .7f, "inverted native");
+        Near(CollectiveCalibration.NativeThrottle(.3f, false, true), -.4f, "signed native");
+        Near(CollectiveCalibration.NativeThrottle(.3f, true, true), .4f, "inverted signed native");
+        Console.WriteLine("PASS: helicopter two-capture axis detection, both orientations, invalid ranges, ambiguity and clamping");
+    }
+
+    static void TestFocusPickup()
+    {
+        var pickup = new FocusPickup();
+        Assert(!pickup.Ready(1), "unfocused input cannot release");
+        pickup.Restored(10);
+        Assert(!pickup.Ready(10), "focus transition frame holds previous thrust");
+        Assert(pickup.Ready(11), "next frame accepts current lever positions");
+        pickup.Lost();
+        Assert(!pickup.Ready(12), "another focus loss restarts the guard");
+        pickup.Restored(12);
+        Assert(!pickup.Ready(12) && pickup.Ready(13), "next focus return again waits one frame");
+    }
+
+    static void TestF22Gauge()
+    {
+        Assert(GaugeCurve.TryMap(.94f, .95f, .90f, out var mil), "F-22 gauge remap is needed");
+        Assert(mil >= .88f && mil < .90f, "F-22 dry MIL displays in its MIL region");
+        Assert(GaugeCurve.TryMap(.95f, .95f, .90f, out var boundary), "engine threshold maps");
+        Near(boundary, .90f, "HUD starts afterburner at engine threshold");
+        Assert(GaugeCurve.TryMap(.975f, .95f, .90f, out var half), "afterburner maps");
+        Near(half, .95f, "half afterburner displays 50 percent");
+        Assert(GaugeCurve.TryMap(0, .95f, .90f, out var zero), "idle maps"); Near(zero, 0, "idle unchanged");
+        Assert(GaugeCurve.TryMap(1, .95f, .90f, out var full), "max maps"); Near(full, 1, "full unchanged");
+        Assert(!GaugeCurve.TryMap(.5f, .9f, .9f, out _), "matching thresholds need no remap");
+        Assert(!GaugeCurve.TryMap(float.NaN, .95f, .90f, out _), "invalid input is not remapped");
+        Assert(!GaugeCurve.TryMap(.5f, float.NaN, .90f, out _), "invalid engine threshold is not remapped");
+        Assert(!GaugeCurve.TryMap(.5f, .95f, 1f, out _), "invalid gauge boundary is not remapped");
+    }
+
     static void TestMultiplayerOwnership()
     {
         Assert(ControlEligibility.CanOwn(true, true, true), "local simulated player can own controls");
@@ -164,6 +223,9 @@ static class Program
 
     public static void Main()
     {
+        TestCollective();
+        TestFocusPickup();
+        TestF22Gauge();
         TestUserControlOptions();
         TestRegisteredEngineDiscovery();
         TestControllerModes();
